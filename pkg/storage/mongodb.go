@@ -8,11 +8,13 @@ package mongodbstore
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 
 	"github.com/pkg/errors"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 
@@ -24,26 +26,41 @@ type Data struct {
 	Value []byte `bson:"Value" json:"Value"`
 }
 
+// Option configures the mongodb provider.
+type Option func(opts *Provider)
+
+// WithDBPrefix option is for adding prefix to db name.
+func WithDBPrefix(dbPrefix string) Option {
+	return func(opts *Provider) {
+		opts.dbPrefix = dbPrefix
+	}
+}
+
 // Provider mongodb implementation of storage.Provider interface
 type Provider struct {
-	dial, dbname string
-	lock         sync.RWMutex
-	client       *mongo.Client
-	db           *mongo.Database
-	collections  map[string]*mongodbStore
+	dial     string
+	client   *mongo.Client
+	db       *mongo.Database
+	dbs      map[string]*mongodbStore
+	dbPrefix string
+	sync.RWMutex
 }
 
 // NewProvider instantiates Provider
-func NewProvider(dial, db string) *Provider {
-	return &Provider{dial: dial, dbname: db, collections: map[string]*mongodbStore{}}
+func NewProvider(dial string, opts ...Option) *Provider {
+	return &Provider{dial: dial, dbs: map[string]*mongodbStore{}}
 }
 
 // OpenStore opens and returns a store for given name space.
 func (r *Provider) OpenStore(name string) (storage.Store, error) {
-	r.lock.Lock()
-	defer r.lock.Unlock()
+	r.Lock()
+	defer r.Unlock()
 
-	store, ok := r.collections[name]
+	if r.dbPrefix != "" {
+		name = r.dbPrefix + "_" + name
+	}
+
+	store, ok := r.dbs[name]
 	if ok {
 		return store, nil
 	}
@@ -58,19 +75,28 @@ func (r *Provider) OpenStore(name string) (storage.Store, error) {
 			return nil, errors.Wrap(err, "unable to connect to mongo opening a new store")
 		}
 		r.client = mongoClient
-		r.db = r.client.Database(r.dbname)
+		r.db = r.client.Database(name)
 	}
 
 	store = &mongodbStore{
 		coll: r.db.Collection(name),
 	}
-	r.collections[name] = store
+	r.dbs[name] = store
 
 	return store, nil
 }
 
 // Close closes all stores created under this store provider
 func (r *Provider) Close() error {
+	r.Lock()
+	defer r.Unlock()
+
+	if len(r.dbs) == 0 {
+		return nil
+	}
+
+	r.dbs = make(map[string]*mongodbStore)
+
 	err := r.client.Disconnect(context.Background())
 	if err != nil {
 		return errors.Wrap(err, "unable to disconnect from mongo")
@@ -79,13 +105,13 @@ func (r *Provider) Close() error {
 	return nil
 }
 
-// CloseStore closes level dbname store of given name
+// CloseStore closes level name store of given name
 func (r *Provider) CloseStore(name string) error {
 	k := strings.ToLower(name)
 
-	_, ok := r.collections[k]
+	_, ok := r.dbs[k]
 	if ok {
-		delete(r.collections, k)
+		delete(r.dbs, k)
 	}
 
 	return nil
@@ -130,13 +156,25 @@ func (r *mongodbStore) Get(k string) ([]byte, error) {
 	return data.Value, nil
 }
 
-// Iterator returns iterator for the latest snapshot of the underlying dbname.
-func (r *mongodbStore) Iterator(start, limit string) storage.StoreIterator {
-	if start == "" || limit == "" {
-		return &mongodbIterator{err: errors.New("start or limit key is mandatory")}
+// Iterator returns iterator for the latest snapshot of the underlying db.
+func (r *mongodbStore) Iterator(start, end string) storage.StoreIterator {
+	q := bson.M{}
+
+	if strings.Contains(end, storage.EndKeySuffix) {
+		newEnd := strings.Replace(end, storage.EndKeySuffix, "", 1)
+
+		if start == newEnd {
+			q = bson.M{"_id": bson.M{"$regex": primitive.Regex{
+				Pattern: fmt.Sprintf("^%s", start),
+				Options: "",
+			}}}
+		}
+	} else {
+		q = bson.M{"_id": bson.M{"$gte": start, "$lt": end}}
 	}
 
-	cur, err := r.coll.Find(context.Background(), bson.M{})
+	opts := options.Find().SetSort(bson.M{"_id": 1})
+	cur, err := r.coll.Find(context.Background(), q, opts)
 	if err != nil {
 		return nil
 	}
@@ -165,11 +203,20 @@ func (r *mongodbIterator) Next() bool {
 }
 
 func (r *mongodbIterator) Release() {
-	_ = r.cursor.Close(context.Background())
+	r.cursor.Current = nil
+	err := r.cursor.Close(context.Background())
+	if err != nil {
+		return
+	}
+
+	r.err = errors.New("Iterator is closed")
 }
 
 func (r *mongodbIterator) Error() error {
-	return r.cursor.Err()
+	if r.cursor.Err() != nil {
+		return r.cursor.Err()
+	}
+	return r.err
 }
 
 func (r *mongodbIterator) Key() []byte {

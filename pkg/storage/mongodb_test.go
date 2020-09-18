@@ -26,8 +26,7 @@ import (
 )
 
 const (
-	mongoStoreDBURL  = "mongodb://localhost:27017"
-	mongoStoreDBName = "test"
+	mongoStoreDBURL = "mongodb://localhost:27017"
 )
 
 //docker run --name some-mongo -d mongo:tag
@@ -84,8 +83,8 @@ func waitForMongoDBToStart() error {
 }
 
 func TestMongoDBStore(t *testing.T) {
-	t.Run("Test couchdb store put and get", func(t *testing.T) {
-		prov := NewProvider(mongoStoreDBName, mongoStoreDBName)
+	t.Run("Test mongodb store put and get", func(t *testing.T) {
+		prov := NewProvider(mongoStoreDBURL, WithDBPrefix("dbPrefix"))
 		require.NotNil(t, prov)
 
 		store, err := prov.OpenStore("test")
@@ -142,8 +141,8 @@ func TestMongoDBStore(t *testing.T) {
 		require.NoError(t, err)
 	})
 
-	t.Run("Test couchdb multi store put and get", func(t *testing.T) {
-		prov := NewProvider(mongoStoreDBName, mongoStoreDBName)
+	t.Run("Test mongodb multi store put and get", func(t *testing.T) {
+		prov := NewProvider(mongoStoreDBURL, WithDBPrefix("dbPrefix"))
 		require.NotNil(t, prov)
 
 		const commonKey = "did:example:1"
@@ -192,18 +191,20 @@ func TestMongoDBStore(t *testing.T) {
 		require.Equal(t, data, doc)
 
 		// store length
-		require.Len(t, prov.collections, 2)
+		require.Len(t, prov.dbs, 2)
 	})
 
-	t.Run("Test couchdb store failures", func(t *testing.T) {
-		prov := NewProvider("wrongURL", "fail")
+	t.Run("Test mongodb store failures", func(t *testing.T) {
+		prov := NewProvider("wrongURL", nil)
+		require.NotNil(t, prov)
+
 		store, err := prov.OpenStore("sample")
 		require.Error(t, err)
 		require.Nil(t, store)
 	})
 
-	t.Run("Test couchdb multi store close by name", func(t *testing.T) {
-		prov := NewProvider(mongoStoreDBName, mongoStoreDBName)
+	t.Run("Test mongodb multi store close by name", func(t *testing.T) {
+		prov := NewProvider(mongoStoreDBURL, WithDBPrefix("dbPrefix"))
 		require.NotNil(t, prov)
 
 		const commonKey = "did:example:1"
@@ -231,7 +232,7 @@ func TestMongoDBStore(t *testing.T) {
 		}
 
 		// verify store length
-		require.Len(t, prov.collections, 5)
+		require.Len(t, prov.dbs, 5)
 
 		for _, name := range storesToClose {
 			store, e := prov.OpenStore(name)
@@ -243,30 +244,31 @@ func TestMongoDBStore(t *testing.T) {
 		}
 
 		// verify store length
-		require.Len(t, prov.collections, 2)
+		require.Len(t, prov.dbs, 2)
 
 		// try to close non existing db
 		err := prov.CloseStore("store_x")
 		require.NoError(t, err)
 
 		// verify store length
-		require.Len(t, prov.collections, 2)
+		require.Len(t, prov.dbs, 2)
 
 		err = prov.Close()
 		require.NoError(t, err)
 
 		// verify store length
-		require.Empty(t, prov.collections)
+		require.Empty(t, prov.dbs)
 
 		// try close all again
 		err = prov.Close()
 		require.NoError(t, err)
 	})
 
-	t.Run("Test couchdb store iterator", func(t *testing.T) {
-		prov := NewProvider(mongoStoreDBName, mongoStoreDBName)
+	t.Run("Test mongodb store iterator", func(t *testing.T) {
+		prov := NewProvider(mongoStoreDBURL, WithDBPrefix("dbPrefix"))
 		require.NotNil(t, prov)
-		store, err := prov.OpenStore("test-iterator")
+
+		store, err := prov.OpenStore("test_iterator")
 		require.NoError(t, err)
 
 		const valPrefix = "val-for-%s"
@@ -313,10 +315,11 @@ func verifyItr(t *testing.T, itr storage.StoreIterator, count int, prefix string
 	require.Contains(t, itr.Error().Error(), "Iterator is closed")
 }
 
-func TestCouchDBStore_Delete(t *testing.T) {
+func TestMongodbStore_Delete(t *testing.T) {
 	const commonKey = "did:example:1234"
 
-	prov := NewProvider(mongoStoreDBName, mongoStoreDBName)
+	prov := NewProvider(mongoStoreDBURL, WithDBPrefix("dbPrefix"))
+	require.NotNil(t, prov)
 
 	data := []byte("value1")
 
